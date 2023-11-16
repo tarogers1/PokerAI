@@ -1,8 +1,8 @@
 import random
 import itertools
 from enum import Enum
-
-class ActionRequest(Enum): #HI NIKASH
+# wait
+class ActionRequest(Enum):
     CHECK=1
     CALL=2
     RAISE=3
@@ -22,6 +22,7 @@ class ActionDispatch(object):
     def __init__(self, req, info=None):
         self.req = req
         self.info = info
+
 class Card(object):
     def __init__(self, suit, face):
         self.suit = suit
@@ -107,18 +108,38 @@ class PokerGame(object):
             last_bet = 0
             bet_end = small_blind
             player = small_blind
+
+            while (self.folded[bet_end]):
+                bet_end = (bet_end + 1) % len(self.folded)
+                player = bet_end
+
             first_turn = True
             self.cards_up.append(self.deck.pop(0))
-            for action_req in self.betting_round(player, bet_end, last_bet, first_turn):
+            for action_req in self.betting_round(player-1, bet_end, last_bet, first_turn):
                 yield action_req
 
             yield [ActionDispatch(ActionRequest.RIVER)]
+            
+            self.bet = 0
+            last_bet = 0
+            bet_end = small_blind
+            player = small_blind
+
+            while (self.folded[bet_end]):
+                bet_end = (bet_end + 1) % len(self.folded)
+                player = bet_end
+
+            first_turn = True
+            self.cards_up.append(self.deck.pop(0))
+            for action_req in self.betting_round(player-1, bet_end, last_bet, first_turn):
+                yield action_req
 
             
     def flip_cards_check_win(self):
         pass
 
     def betting_round(self, player, bet_end, last_bet, first_turn):
+        print("BETTING", player, bet_end)
         done_pre_flop = False
         while not done_pre_flop:
             player = (player + 1) % len(self.players)
