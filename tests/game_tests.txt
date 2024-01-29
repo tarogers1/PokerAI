@@ -1,0 +1,41 @@
+3
+120 120 120
+True, True, True
+fold
+raise 50
+fold
+
+5
+120 49 12, 100, 39
+True, False, True, False
+fold
+raise 50
+call
+call
+
+3
+120 120 120
+True, True, False
+fold
+
+2
+239 120
+True, True
+call
+raise 240
+call
+
+
+2
+300 120
+True, True
+call
+raise 100
+raise 200
+fold
+
+4
+239 120, 100, 20
+True, False, False, True
+call
+check
