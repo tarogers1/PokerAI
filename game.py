@@ -16,6 +16,7 @@ class ActionRequest(Enum):
     TURN = 7
     RIVER = 8
     PREFLOP = 9
+    ALLIN = 10
 
 
 class AReqInfo(object):
@@ -26,6 +27,9 @@ class AReqInfo(object):
 
 hands = {"High Card": 0, "Pair": 1, "Two Pair": 2, "Three of a Kind": 3, "Straight": 4, "Flush": 5, "Full House": 6,
                          "Four of a Kind": 7, "Straight Flush": 8}
+
+def argsort(x):
+    return list(sorted(range(len(x)), key=lambda y: x[y]))
 
 class ActionDispatch(object):
     def __init__(self, req, info=None):
@@ -60,6 +64,10 @@ class PokerGame(object):
         self.big_blind = 0
         self.all_folded = False
         self.verbose = verbose
+        self.all_ins = [None for _ in players]
+        self.last_allin = 0
+
+        self.subpots = []
 
     def make_action(self, req, info):
         self.action = ActionDispatch(req, info)
@@ -101,6 +109,11 @@ class PokerGame(object):
             self.all_folded = False
             pot = 0
 
+            self.all_ins = [None for _ in self.players]
+            self.last_allin = 0
+
+            self.subpots = []
+
             self.deal_cards()
             for p, v in self.player_money.items():
                 if v <= 0:
@@ -110,7 +123,7 @@ class PokerGame(object):
             yield [ActionDispatch(ActionRequest.NEW_ROUND)]
 
             rounds = {ActionRequest.PREFLOP: 0, ActionRequest.FLOP: 3, ActionRequest.TURN: 1, ActionRequest.RIVER: 1}
-            for round_type, new_cards in rounds.items():
+            for round_i, (round_type, new_cards) in enumerate(rounds.items()):
                 if self.all_folded:
                     continue
 
@@ -120,7 +133,7 @@ class PokerGame(object):
                     bet_end = small_blind
                     player = small_blind
 
-                    while (self.folded[bet_end]):
+                    while (self.folded[bet_end] or self.all_ins[bet_end]):
                         bet_end = (bet_end + 1) % len(self.players)
                         player = bet_end
 
@@ -131,7 +144,7 @@ class PokerGame(object):
                 for i in range(new_cards):
                     self.cards_up.append(self.deck.pop())
 
-                for action_req in self.betting_round(player, bet_end, last_bet, first_turn):
+                for action_req in self.betting_round(player, bet_end, last_bet, first_turn, round_i):
                     yield action_req
 
                 pot += sum(list(self.running_bets.values()))
@@ -142,7 +155,19 @@ class PokerGame(object):
                     self.player_money[winner] += pot
                     continue
 
-            if not self.all_folded:
+                if sum([a or (b is not None) for a, b in zip(self.folded.values(), self.all_ins)]) >= len(self.players)-1:
+                    break
+
+            while len(self.cards_up) < 5:
+                self.cards_up.append(self.deck.pop())
+
+            if self.all_folded:
+                continue
+
+            num_allin = sum([a is not None for a in self.all_ins])
+
+            # no side pots, so straightforward
+            if num_allin == 0:
                 winners, losers = self.flip_cards_check_win()
                 for winner in winners:
                     self.player_money[winner[0]] += pot/len(winners)
@@ -153,6 +178,68 @@ class PokerGame(object):
 
                     print(f"Losers: {fl}")
                     print(f"Winners: {fw}")
+                continue
+
+            # someone went all in
+            players_playing = [i for i, f in enumerate(self.folded.values()) if not f]
+            num_players = len(players_playing)
+            order_wins, order_hands = self.flip_cards_check_win(order=True)
+            sub_pots = []
+            excluded = []
+
+            sorted_all_ins = argsort([a if a is not None else -1 for a in self.all_ins])
+            last_pot_size = 0
+
+            # calculate size of each side pot
+
+            for player_idx, p in enumerate(sorted_all_ins):
+                if self.all_ins[player_idx] is None:
+                    continue
+
+                sub_pot_size = (self.all_ins[player_idx] - last_pot_size)*(num_players-(len(excluded[-1]) if len(excluded) > 0 else 0))
+                last_pot_size = self.all_ins[player_idx]
+
+                sub_pots.append(sub_pot_size)
+                pot -= sub_pot_size
+                if len(excluded) == 0:
+                    excluded.append([p])
+                else:
+                    excluded.append(excluded[-1]+[p])
+
+            excluded = [e[:-1] for e in excluded]
+
+            # extra side pot bets
+            if pot > 0:
+                sub_pots.append(pot)
+                excluded.append(excluded[-1]+[sorted_all_ins[-1]])
+                pot = 0
+
+            # go through each sub pot and award money to winners
+            for exclude, sub_pot in zip(excluded, sub_pots):
+                min_priority = float("inf")
+                min_players = []
+                for player in players_playing:
+                    if player in exclude:
+                        continue
+
+                    if len(min_players) == 0:
+                        min_priority = order_wins[player]
+                        min_players.append(player)
+                        continue
+
+                    if order_wins[player] == min_priority:
+                        min_players.append(player)
+
+                    if order_wins[player] < min_priority:
+                        min_priority = order_wins[player]
+                        min_players = [player]
+
+                for player in min_players:
+                    self.player_money[player] += sub_pot / len(min_players)
+
+                if self.verbose > 0:
+                    fw = ' |'.join([f'Player {p}: {" ".join(str(ncnc) for ncnc in order_hands[p][0])}, {order_hands[p][1]}' for p in min_players])
+                    print(f"Sub Pot: {sub_pot}, winners: {fw}")
 
     @staticmethod
     def check_individual_hand(cards):
@@ -168,7 +255,7 @@ class PokerGame(object):
 
         flush = max(suit_dic.values()) >= 5
 
-        if 14 in num_dic:
+        if 14 in num_dic: # Aces can be either 14 value or 1 value for straights
             mod_cards = [1] + card_nums
 
             diffs1 = [c2 - c1 for c1, c2 in zip(mod_cards[:5], mod_cards[1:-1])]
@@ -177,15 +264,15 @@ class PokerGame(object):
             diffs2 = [c2 - c1 for c1, c2 in zip(mod_cards[1:-1], mod_cards[2:])]
             diffs2 = [(d - 1) != 0 for d in diffs2]
 
-            straight1 = sum(diffs1) == 0
-            straight2 = sum(diffs2) == 0
+            straight1 = sum(diffs1) == 0 # Ace = 1
+            straight2 = sum(diffs2) == 0 # Ace = 14
 
 
             straight = straight1 or straight2
             #if straight:
                 #print(diffs1, diffs2)
 
-            max_card = max(mod_cards[:-1]) if straight1 and not straight2 else max(card_nums)
+            max_card = max(mod_cards[:-1]) if straight1 and not straight2 else max(card_nums) # max card: 14 if Ace is 14 else other max card
         else:
             diffs = [c2 - c1 for c1, c2 in zip(card_nums[:-1], card_nums[1:])]
             straight = sum(diffs) == 0
@@ -201,7 +288,7 @@ class PokerGame(object):
         elif flush:
             pats.append(("Flush", (hands["Flush"], max_card)))
 
-        # pair derivatives
+        # pair patterns
         patterns = {
             "xxxxx": "High Card",
             "PPxxx": "Pair",
@@ -211,6 +298,7 @@ class PokerGame(object):
             "PPPPx": "Four of a Kind"
         }
         pairs = list(filter(lambda x: num_dic[x] >= 2, list(num_dic.keys())))
+        # creating patterns from card numbers
         for p1, p2 in itertools.product(pairs, pairs):
             M = max(num_dic[p1], num_dic[p2])
             m = min(num_dic[p1], num_dic[p2])
@@ -235,11 +323,28 @@ class PokerGame(object):
 
     @staticmethod
     def check_hand(cards):
+        # go through each combo and find best (7 choose 5 combos)
         max_ev = max([PokerGame.check_individual_hand(combo) for combo in itertools.combinations(cards, 5)], key=lambda x: x[2])
         return max_ev
 
-    def flip_cards_check_win(self):
-        winners = sorted([(p, PokerGame.check_hand(c+self.cards_up)) for p, c in enumerate(self.player_cards.values())], key=lambda x: x[1][2], reverse=True)
+    def flip_cards_check_win(self, order=False):
+        # depends on if side pot: if there is side pot, need to account for fact that not everyone who hasn't folded is in each pot
+        winners = sorted([(p, PokerGame.check_hand(c+self.cards_up)) for p, c in enumerate(self.player_cards.values()) if not self.folded[p]], key=lambda x: x[1][2], reverse=True)
+        if order:
+            cur_val = winners[0][1]
+            order_idx = 0
+            winner_dic = {winners[0][0]: order_idx}
+            hand_dic = {winners[0][0]: winners[0][1]}
+            for poss_winner, val in winners[1:]:
+                if cur_val != val:
+                    cur_val = val
+                    order_idx += 1
+
+                winner_dic[poss_winner] = order_idx
+                hand_dic[poss_winner] = val
+
+            return winner_dic, hand_dic
+
         winner = winners[0]
         def_winners = [winner]
         for poss_winner in winners[1:]:
@@ -249,32 +354,50 @@ class PokerGame(object):
         return def_winners, winners[len(def_winners):]
 
 
+    def betting_round(self, player, bet_end, last_bet, first_turn, r):
+        # base logic for each betting sequence
 
-
-    def betting_round(self, player, bet_end, last_bet, first_turn):
-       # print("BETTING", player, bet_end)
         done_pre_flop = False
+        n_players = len(self.players) - sum(self.folded.values())
         while not done_pre_flop:
+            all_in_call = False
+
+            if n_players <= 0:
+                return
+
             if player == bet_end and not first_turn:
                 done_pre_flop = True
                 break
 
             first_turn = False
 
-            if self.folded[player]:
+            if self.folded[player] or self.all_ins[player]:
                 player = (player + 1) % len(self.players)
                 continue
 
             moves = [AReqInfo(player, ActionRequest.FOLD)]
-            if self.running_bets[player] < self.bet:
+
+            # give player legal actions
+            if self.bet >= self.running_bets[player]+self.player_money[player]:
+                all_in_call = True
+                moves.append(AReqInfo(player, ActionRequest.ALLIN))
+
+            elif n_players == 1:
+                moves.append(AReqInfo(player, ActionRequest.ALLIN))
+
+            elif self.running_bets[player] < self.bet:
                 moves.append(AReqInfo(player, ActionRequest.CALL))
                 moves.append(AReqInfo(player, ActionRequest.RAISE))
+                moves.append(AReqInfo(player, ActionRequest.ALLIN))
             else:
                 moves.append(AReqInfo(player, ActionRequest.CHECK))
                 moves.append(AReqInfo(player, ActionRequest.RAISE))
+                moves.append(AReqInfo(player, ActionRequest.ALLIN))
 
-            yield moves
+            yield moves # intended as for loop, yield gives back to controller code how poss actions
+            # then action_type holds the action
 
+            # handling actions
             action_type = self.action.req
             if action_type == ActionRequest.CHECK:
                 pass
@@ -283,13 +406,24 @@ class PokerGame(object):
                 self.player_money[player] -= (self.bet - self.running_bets[player])
                 self.running_bets[player] = self.bet
 
+            if action_type == ActionRequest.ALLIN:
+                self.running_bets[player] += self.player_money[player]
+                self.player_money[player] = 0
+                self.all_ins[player] = self.running_bets[player]
+                # if all_in is calling another all_in, then bet should still be higher value
+                self.bet = self.running_bets[player] if not all_in_call else self.bet
+                bet_end = player if not all_in_call else bet_end
+
+                n_players -= 1
+
             if action_type == ActionRequest.RAISE:
                 self.player_money[player] -= (self.action.info - self.running_bets[player])
                 self.running_bets[player] = self.action.info
-                self.bet = self.action.info
+                self.bet = self.action.info # info holds raise amount
                 bet_end = player
 
             if action_type == ActionRequest.FOLD:
+                n_players -= 1
                 self.folded[player] = True
                 self.all_folded = False
                 not_fold_count = 0
