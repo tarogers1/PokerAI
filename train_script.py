@@ -99,6 +99,9 @@ class RandomAgent(BaseModel):
         self.inverse_greed = inverse_greed
 
     def get_action(self, game, player, actions):
+        if ActionRequest.ALLIN in actions:
+            actions.remove(ActionRequest.ALLIN)
+
         return random.choice(actions), min(random.uniform(game.bet, game.bet+game.player_money[player]/self.inverse_greed),
                                            max(game.running_bets.values())+game.player_money[player])
 
@@ -106,5 +109,5 @@ if __name__ == "__main__":
     dna = CoachDNA(2, 100, (10, 5))
     coach = ModelDataCoach(RandomAgent(inverse_greed=3), dna)
 
-    res = coach.test_agents(RandomAgent(inverse_greed=6))
+    res = coach.test_agents(RandomAgent(inverse_greed=6), games=10000)
     print(res)
